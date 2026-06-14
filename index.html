@@ -1,0 +1,287 @@
+<!-- VERSION METADATA
+Version: 4.8
+Last Updated: 2026-06-09
+Author: Internal Team
+Description: Fare + Tax Master Calculator with K3 tax calculation, currency support, and auto-formatting
+Changes in V4.8:
+- FIX: Q surcharge regex now uses negative lookbehind (?<![A-Z0-9]) to prevent matching Q inside
+  a fare basis code (e.g. 256.70QWEEPIN1 was incorrectly producing a 1.00 surcharge)
+- FIX: Fare component limit raised from 4 to 6 to support side trip strings with up to 4 main
+  components plus 2 side trip components inside brackets
+- NOTE: Open jaw (-/) and side trip (brackets) strings parse correctly without code changes —
+  the fare and Q patterns skip these markers naturally
+Changes in V4.7:
+- FIX: Q surcharge regex now allows 0 city codes — plain Q5.00 was previously rejected (minimum was 1 city code)
+- FIX: Q surcharge regex now handles optional space between Q and city codes e.g. Q MAACCU5.00
+- FIX: Q surcharge regex now matches integer amounts e.g. Q5 (no decimal point required)
+- FIX: Fare basis pattern designator is now optional — fares without /NDC2 style suffix now parse correctly
+Changes in V4.6 (Bug Fix Release):
+- FIX: Moved <script> block inside <body> — was placed after closing </body> tag (invalid HTML)
+- FIX: K3 now only applies on positive fare difference (upgrade); was incorrectly applied on downgrades
+- FIX: Eliminated mutual recursion between calculateTaxes() and calculateFare() that risked stale UI state
+- FIX: isCalculatingFare flag now reset on K3 cabin-error early return (was permanently locking the calculator)
+- FIX: k3OnYQ now included in perPax in buildCurrentSummaryData() (was missing, causing understated amounts)
+- FIX: GDS string total now uses perPax instead of subTotal (subTotal is multi-pax, GDS is per-transaction)
+- FIX: Theme default now sets data-theme="dark" explicitly so toggleTheme() has consistent initial state
+- FIX: formatTaxInput() regex widened from {2} to {1,6} chars to match parseTaxToken() and stop dropping valid tax codes
+- FIX: clearFare() now also clears the Tax Adjustment field (was showing stale value)
+- FIX: Ctrl+C shortcut changed to Ctrl+Shift+C to stop hijacking the OS copy command
+- FIX: Added missing aria-describedby target elements for K3 checkboxes (accessibility)
+-->
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Fare + Tax Master Calculator (Fare_tax_calc_V4)</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<h1>Manual Reprice - Master Calculator</h1>
+<button id="helpIcon" class="help-icon" type="button" aria-label="Show keyboard shortcuts">⌨️</button>
+<button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle light/dark mode">🌙</button>
+<div id="errorModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modalMessage">
+  <div class="modal-box error">
+    <div class="modal-message" id="modalMessage"></div>
+    <button class="modal-close-btn" onclick="closeErrorModal()" aria-label="Close error message">OK</button>
+  </div>
+</div>
+<div id="helpModal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="helpModalTitle">
+  <div class="modal-box">
+    <h3 id="helpModalTitle">Keyboard Shortcuts</h3>
+    <div class="help-content">
+      <p><kbd>Enter</kbd> - Calculate Tax/Fare</p>
+      <p><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> - Clear Fare</p>
+      <p><kbd>Ctrl</kbd> + <kbd>X</kbd> - Clear Taxes</p>
+      <p><kbd>Ctrl</kbd> + <kbd>M</kbd> - Toggle Dark/Light Mode</p>
+      <p><kbd>Ctrl</kbd> + <kbd>?</kbd> - Show this help</p>
+      <p><kbd>Escape</kbd> - Close modals</p>
+    </div>
+    <button class="modal-close-btn" onclick="closeHelpModal()" aria-label="Close help">Close</button>
+  </div>
+</div>
+<div id="errorDisplay" class="error-display" role="alert" aria-live="assertive" aria-atomic="true"></div>
+<div class="calculator-container">
+<div class="left-column">
+<section aria-labelledby="taxSectionHeading">
+  <div class="section-header">
+    <h2 id="taxSectionHeading">Tax Adjustment Calculator</h2>
+    <button class="toggle-btn" id="taxToggleBtn" type="button" aria-expanded="true" aria-controls="taxCollapsible">Hide</button>
+  </div>
+  <div class="collapsible-content" id="taxCollapsible" role="region" aria-live="polite">
+    <div class="section-grid">
+      <div class="section-grid-full">
+        <label for="oldTax">OLD TAX</label>
+        <textarea id="oldTax" placeholder="OLD TAX" aria-describedby="oldTaxDesc"></textarea>
+        <span id="oldTaxDesc" class="sr-only">Enter old tax amounts in format: INR100YQ or 100YQ</span>
+      </div>
+      <div class="section-grid-full">
+        <label for="newTax">NEW TAX</label>
+        <textarea id="newTax" placeholder="NEW TAX" aria-describedby="newTaxDesc"></textarea>
+        <span id="newTaxDesc" class="sr-only">Enter new tax amounts in format: INR100YQ or 100YQ</span>
+      </div>
+      <div class="checkbox-cell checkbox-inline">
+        <input id="applyK3OnYQ" type="checkbox" aria-describedby="k3YQDescription">
+        <label for="applyK3OnYQ">Apply K3 on Positive YQ Tax</label>
+      </div>
+      <span id="k3YQDescription" class="sr-only">Calculates K3 tax on the positive YQ fuel surcharge difference, based on the selected cabin type.</span>
+      <div class="section-grid-full button-row">
+        <button id="taxCalcButton" type="button" aria-label="Calculate tax adjustment">Calculate Tax Adjustment</button>
+        <button id="taxClearButton" type="button" class="secondary" aria-label="Clear tax fields">Clear Taxes</button>
+      </div>
+    </div>
+    <div id="taxResult" role="region" aria-live="polite" aria-label="Tax calculation results"></div>
+  </div>
+</section>
+
+<section aria-labelledby="parserSectionHeading">
+  <div class="section-header">
+    <h2 id="parserSectionHeading">Fare Calculation String Parser</h2>
+    <button class="toggle-btn" id="parserToggleBtn" type="button" aria-expanded="true" aria-controls="parserCollapsible">Hide</button>
+  </div>
+  <div class="collapsible-content" id="parserCollapsible" role="region" aria-live="polite">
+    <div class="section-grid">
+      <div class="section-grid-full">
+        <label for="fareCalcString">Fare Calculation String</label>
+        <textarea id="fareCalcString" placeholder="Example: BOM EK X/DXB EK NYC 102.21TLEEPIN1/NDC2 EK X/DXB BOM 404.56XWEEFIN1/NDC2 Q5.00 NUC511.77 ROE90.3344456"></textarea>
+      </div>
+      <div class="section-grid-full button-row">
+        <button id="parseButton" type="button" aria-label="Parse fare calculation string">Convert</button>
+        <button id="parserClearButton" type="button" class="secondary" aria-label="Clear parser fields">Clear</button>
+      </div>
+    </div>
+    <div id="parserResults" role="region" aria-live="polite" aria-label="Parser results" style="display: none;">
+      <div class="result-section" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-color);">
+        <div class="result-item">
+          <div class="result-label" style="font-weight: 600; color: var(--text-secondary); font-size: 0.9rem;">Fare Components</div>
+          <ul id="fareComponents" class="result-list" style="margin: 4px 0 0 0; padding-left: 20px;"></ul>
+        </div>
+        <div class="result-item" id="qSurchargesSection" style="display: none;">
+          <div class="result-label" style="font-weight: 600; color: var(--text-secondary); font-size: 0.9rem;">Q Surcharges</div>
+          <ul id="qSurcharges" class="result-list" style="margin: 4px 0 0 0; padding-left: 20px;"></ul>
+        </div>
+        <div class="result-item">
+          <div class="result-label" style="font-weight: 600; color: var(--text-secondary); font-size: 0.9rem;">Calculated NUC</div>
+          <div id="calculatedNuc" class="result-value" style="font-size: 1.1rem; color: var(--text-primary); margin-top: 4px;"></div>
+        </div>
+        <div class="result-item">
+          <div class="result-label" style="font-weight: 600; color: var(--text-secondary); font-size: 0.9rem;">Stated NUC</div>
+          <div id="statedNuc" class="result-value" style="font-size: 1.1rem; color: var(--text-primary); margin-top: 4px;"></div>
+        </div>
+        <div class="result-item">
+          <div class="result-label" style="font-weight: 600; color: var(--text-secondary); font-size: 0.9rem;">NUC Validation</div>
+          <div id="nucValidation" class="result-value" style="font-size: 1.1rem; color: var(--text-primary); margin-top: 4px;"></div>
+        </div>
+        <div class="result-item">
+          <div class="result-label" style="font-weight: 600; color: var(--text-secondary); font-size: 0.9rem;">ROE</div>
+          <div id="roe" class="result-value" style="font-size: 1.1rem; color: var(--text-primary); margin-top: 4px;"></div>
+        </div>
+        <div class="result-item">
+          <div class="result-label" style="font-weight: 600; color: var(--text-secondary); font-size: 0.9rem;">Base Fare (NUC × ROE)</div>
+          <div id="baseFare" class="result-value highlight" style="font-size: 1.1rem; color: var(--primary-cyan); font-weight: 700; margin-top: 4px;"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+</div>
+
+<section aria-labelledby="fareSectionHeading">
+  <h2 id="fareSectionHeading">Fare Calculator</h2>
+  <div class="section-grid">
+    <div>
+      <label for="currency">Currency</label>
+      <select id="currency" aria-label="Select currency">
+        <option value="" disabled selected>Choose Currency</option>
+        <option value="INR">INR - Indian Rupee</option>
+        <option value="USD">USD - US Dollar</option>
+        <option value="EUR">EUR - Euro</option>
+        <option value="GBP">GBP - British Pound</option>
+        <option value="JPY">JPY - Japanese Yen</option>
+        <option value="AUD">AUD - Australian Dollar</option>
+        <option value="CAD">CAD - Canadian Dollar</option>
+        <option value="CHF">CHF - Swiss Franc</option>
+        <option value="CNY">CNY - Chinese Yuan</option>
+        <option value="SEK">SEK - Swedish Krona</option>
+        <option value="NZD">NZD - New Zealand Dollar</option>
+        <option value="MXN">MXN - Mexican Peso</option>
+        <option value="SGD">SGD - Singapore Dollar</option>
+        <option value="HKD">HKD - Hong Kong Dollar</option>
+        <option value="NOK">NOK - Norwegian Krone</option>
+        <option value="KRW">KRW - South Korean Won</option>
+        <option value="TRY">TRY - Turkish Lira</option>
+        <option value="RUB">RUB - Russian Ruble</option>
+        <option value="BRL">BRL - Brazilian Real</option>
+        <option value="ZAR">ZAR - South African Rand</option>
+        <option value="AED">AED - UAE Dirham</option>
+        <option value="SAR">SAR - Saudi Riyal</option>
+        <option value="THB">THB - Thai Baht</option>
+        <option value="MYR">MYR - Malaysian Ringgit</option>
+        <option value="IDR">IDR - Indonesian Rupiah</option>
+        <option value="PHP">PHP - Philippine Peso</option>
+        <option value="VND">VND - Vietnamese Dong</option>
+        <option value="PKR">PKR - Pakistani Rupee</option>
+        <option value="BDT">BDT - Bangladeshi Taka</option>
+        <option value="LKR">LKR - Sri Lankan Rupee</option>
+      </select>
+    </div>
+    <div>
+      <label for="cabin">Cabin Type</label>
+      <select id="cabin" aria-label="Select cabin type for K3 calculation">
+        <option value="">-- Select Cabin --</option>
+        <option value="economy">Economy</option>
+        <option value="premium">Premium Economy</option>
+        <option value="business">Business</option>
+        <option value="first">First</option>
+      </select>
+    </div>
+    <div>
+      <label for="oldFare">Old Base Fare</label>
+      <input id="oldFare" placeholder="e.g. 12000 or INR12000" aria-label="Old base fare amount">
+    </div>
+    <div>
+      <label for="newFare">New Base Fare</label>
+      <input id="newFare" placeholder="e.g. 15000 or USD15000" aria-label="New base fare amount">
+    </div>
+    <div>
+      <label for="fareDiff">Fare Difference</label>
+      <input id="fareDiff" readonly placeholder="Fare Difference" aria-label="Calculated fare difference">
+    </div>
+    <div class="checkbox-cell">
+      <label>&nbsp;</label>
+      <div>
+        <input id="applyK3OnFareDiff" type="checkbox" aria-describedby="k3Description">
+        <label for="applyK3OnFareDiff">Apply K3 on Fare Difference</label>
+      </div>
+    </div>
+    <span id="k3Description" class="sr-only">Calculates K3 service tax on the applicable amount based on the selected cabin type.</span>
+    <div>
+      <label for="k3Tax">Calculated K3</label>
+      <input id="k3Tax" readonly aria-label="Calculated K3 tax amount">
+    </div>
+    <div>
+      <label for="changeFee">Change Fee</label>
+      <input id="changeFee" placeholder="e.g. 3000" aria-label="Change fee amount">
+    </div>
+    <div class="checkbox-cell">
+      <label>&nbsp;</label>
+      <div>
+        <input id="applyK3OnChangeFee" type="checkbox" aria-describedby="k3Description">
+        <label for="applyK3OnChangeFee">Apply K3 on Change Fee</label>
+      </div>
+    </div>
+    <div class="section-grid-full">
+      <label for="addTaxes">Add Taxes</label>
+      <textarea id="addTaxes" readonly aria-label="Taxes to be added"></textarea>
+    </div>
+    <div class="section-grid-full">
+      <label for="refundTaxes">Refund Taxes</label>
+      <textarea id="refundTaxes" readonly aria-label="Taxes to be refunded"></textarea>
+    </div>
+    <div>
+      <label for="taxAdj">Tax Adjustment (Net)</label>
+      <input id="taxAdj" readonly aria-label="Net tax adjustment amount">
+    </div>
+    <div>
+      <label for="perPax">Amount Payable per Passenger</label>
+      <input id="perPax" readonly aria-label="Amount payable per passenger">
+    </div>
+    <div>
+      <label for="pax">No. of Pax</label>
+      <input id="pax" type="number" value="1" min="1" aria-label="Number of passengers">
+    </div>
+    <div>
+      <label for="subTotal">Sub Total</label>
+      <input id="subTotal" readonly aria-label="Subtotal for all passengers">
+    </div>
+    <div class="section-grid-full button-row">
+      <button id="fareCalcButton" type="button" aria-label="Calculate fare">Calculate Fare</button>
+      <button id="fareClearButton" type="button" class="secondary" aria-label="Clear fare fields">Clear Fare</button>
+      <div id="inrMessage" class="inr-warning" role="alert" aria-live="polite"></div>
+    </div>
+  </div>
+</section>
+</div>
+
+<section class="full-width" aria-labelledby="summaryHeading">
+  <h2 id="summaryHeading">Final Summary</h2>
+  <div class="button-row section-grid-full">
+    <button id="summariseButton" type="button" aria-label="Generate summary and GDS string">Summarise</button>
+  </div>
+  <div id="summaryContent" style="display: none;">
+    <div class="gds-section">
+      <div class="gds-input-wrapper">
+        <input id="gdsString" readonly aria-label="GDS-formatted string for command line">
+        <button id="copyGdsButton" type="button" class="gds-copy-btn" aria-label="Copy GDS string to clipboard">Copy</button>
+      </div>
+    </div>
+    <div class="button-row section-grid-full">
+      <button id="copySummaryButton" type="button" aria-label="Copy summary to clipboard">Copy Summary</button>
+    </div>
+    <div id="summary" role="region" aria-live="polite" aria-label="Calculation summary table"></div>
+  </div>
+</section>
+
+<script src="js/script.js"></script>
+</body>
+</html>
