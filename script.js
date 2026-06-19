@@ -368,13 +368,13 @@ function parseFareCalcStringInternal(input) {
 
   // Extract fare amounts (numbers before fare basis codes)
   // Pattern: number (with or without decimal) followed by 8-character fare basis (alphanumeric), optional CH|IN suffix, and /4-character designator (alphanumeric)
-  const farePattern = /(\d+(?:\.\d+)?)([A-Z0-9]{8})((?:CH|IN)?)(?:\/[A-Z0-9]{1,4})?/g;
+  const farePattern = /(\d+(?:\.\d+)?)([A-Z0-9]{8})(CH|IN)?(?:\/[A-Z0-9]{1,4})?/g;
   let fareMatch;
   while ((fareMatch = farePattern.exec(input)) !== null && result.fareComponents.length < 6) {
     result.fareComponents.push({
       amount: parseFloat(fareMatch[1]),
       fareBasis: fareMatch[2],
-      paxType: getPaxType(fareMatch[3])
+      paxType: getPaxType(fareMatch[3] || '')
     });
   }
 
