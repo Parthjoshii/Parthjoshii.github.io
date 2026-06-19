@@ -271,7 +271,7 @@ function parseFareCalcString() {
   const parsed = parseFareCalcStringInternal(input);
 
   // Validation
-  if (parsed.fareAmounts.length === 0) {
+  if (parsed.fareComponents.length === 0) {
     showError('No fare amounts found in the string. Format: number followed by fare basis (e.g., 102.21TLEEPIN1/NDC2)');
     els.parserResults.style.display = 'none';
     return;
@@ -290,13 +290,13 @@ function parseFareCalcString() {
   }
 
   // Calculate NUC
-  const fareSum = parsed.fareAmounts.reduce((sum, amount) => sum + amount, 0);
+  const fareSum = parsed.fareComponents.reduce((sum, comp) => sum + comp.amount, 0);
   const qSum = parsed.qSurcharges.reduce((sum, amount) => sum + amount, 0);
   const calculatedNuc = fareSum + qSum;
 
   // Display fare components
-  els.fareComponents.innerHTML = parsed.fareAmounts
-    .map(amount => `<li>${amount.toFixed(2)}</li>`)
+  els.fareComponents.innerHTML = parsed.fareComponents
+    .map(comp => `<li>${comp.amount.toFixed(2)}</li>`)
     .join('');
 
   // Display Q surcharges
@@ -342,20 +342,40 @@ function parseFareCalcString() {
   els.parserResults.style.display = 'block';
 }
 
+function getPaxType(suffix) {
+  if (suffix === 'CH') return 'Child';
+  if (suffix === 'IN') return 'Infant';
+  return 'Adult';
+}
+
+function parseFareBasis(code) {
+  return {
+    brand: code[0],
+    filler: code.substring(1, 4),
+    type: code[4],
+    country: code.substring(5, 7),
+    level: code[7]
+  };
+}
+
 function parseFareCalcStringInternal(input) {
   const result = {
-    fareAmounts: [],
+    fareComponents: [],
     qSurcharges: [],
     nuc: null,
     roe: null,
   };
 
   // Extract fare amounts (numbers before fare basis codes)
-  // Pattern: number (with or without decimal) followed by 8-character fare basis (alphanumeric) and /4-character designator (alphanumeric)
-  const farePattern = /(\d+(?:\.\d+)?)([A-Z0-9]{8})(?:\/[A-Z0-9]{1,4})?/g;
+  // Pattern: number (with or without decimal) followed by 8-character fare basis (alphanumeric), optional CH|IN suffix, and /4-character designator (alphanumeric)
+  const farePattern = /(\d+(?:\.\d+)?)([A-Z0-9]{8})((?:CH|IN)?)(?:\/[A-Z0-9]{1,4})?/g;
   let fareMatch;
-  while ((fareMatch = farePattern.exec(input)) !== null && result.fareAmounts.length < 6) {
-    result.fareAmounts.push(parseFloat(fareMatch[1]));
+  while ((fareMatch = farePattern.exec(input)) !== null && result.fareComponents.length < 6) {
+    result.fareComponents.push({
+      amount: parseFloat(fareMatch[1]),
+      fareBasis: fareMatch[2],
+      paxType: getPaxType(fareMatch[3])
+    });
   }
 
   // Extract Q surcharges
