@@ -310,7 +310,7 @@ function parseFareCalcString() {
   }
 
   // Display calculated NUC with breakdown
-  const breakdown = parsed.fareAmounts.map(a => a.toFixed(2)).join(' + ');
+  const breakdown = parsed.fareComponents.map(comp => comp.amount.toFixed(2)).join(' + ');
   if (parsed.qSurcharges.length > 0) {
     const qBreakdown = parsed.qSurcharges.map(a => a.toFixed(2)).join(' + ');
     els.calculatedNuc.innerHTML = `${calculatedNuc.toFixed(2)} <span style="font-size: 0.85rem; color: var(--text-secondary);">(${breakdown} + ${qBreakdown})</span>`;
