@@ -1,2 +1,2 @@
 Master calculator for manual calculation.
-git pull origin main
+Conflict reseolved, git restored
